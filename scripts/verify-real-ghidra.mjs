@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { verifyProjectCoverage } from "./verify-real-ghidra-project-coverage.mjs";
+
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,10 +12,10 @@ import { promisify } from "node:util";
 import { parseBinaryTarget } from "../dist/application/BinaryTargetResolver.js";
 import { resolveGhidraAnalysisProfile } from "../dist/ghidra/GhidraAnalysisProfile.js";
 import { GhidraClient } from "../dist/ghidra/GhidraClient.js";
-import { inspectGhidraInstallation } from "../dist/ghidra/GhidraInstallation.js";
-import { SUPPORTED_GHIDRA_VERSION } from "../dist/ghidra/GhidraInstallationPolicy.js";
+import { inspectVerifierGhidraInstallation } from "./lib/ghidra-installation-inspection.mjs";
+import { SUPPORTED_GHIDRA_VERSION } from "../dist/ghidra/GhidraReleasePolicy.js";
 import { GhidraHeadlessLauncher } from "../dist/ghidra/GhidraLauncher.js";
-import { GHIDRA_PROVIDER_IDENTITY } from "../dist/ghidra/GhidraProviderCapabilities.js";
+import { GHIDRA_PROVIDER_IDENTITY } from "../dist/ghidra/GhidraProviderMetadata.js";
 
 import {
   assertCleanup,
@@ -32,12 +34,14 @@ import {
 } from "./verify-real-ghidra-inventory.mjs";
 import { completeVerifierRun, createVerifierRun } from "./lib/verifier-run.mjs";
 import { hasTypedSwitchEvidence } from "./verify-real-ghidra-switch-assertions.mjs";
+import { verifyGhidraRelocationSymbols } from "./lib/real-ghidra-relocation-symbols.mjs";
 
 import {
   verifyDenseDefaultReturn,
   verifyJumpTableDenseSwitch,
   verifyNativeTypeLayout,
   verifyRelativeSwitch,
+  verifyRelativeSignedSwitch,
   verifyNativeValueTrace,
 } from "./verify-real-ghidra-function.mjs";
 const exec = promisify(execFile);
@@ -48,7 +52,7 @@ if (installDir === undefined || !isAbsolute(installDir))
   throw new Error(
     "Set GHIDRA_INSTALL_DIR to the absolute root of an extracted Ghidra 12.1.4 release.",
   );
-const installation = inspectGhidraInstallation({
+const installation = await inspectVerifierGhidraInstallation({
   environment: process.env,
   installDir,
   ...(process.env.JAVA_HOME === undefined
@@ -173,6 +177,36 @@ try {
         ]);
       }
     }
+    const signedRelativeSource = fileURLToPath(
+      new URL(
+        "../tests/conformance/ghidra/relative-switch-signed.S",
+        import.meta.url,
+      ),
+    );
+    for (const selectorBias of [0, 2, 10]) {
+      for (const format of [
+        "elf",
+        ...(expectedNativeTarget.architecture === "arm64" ? ["mach-o"] : []),
+      ]) {
+        const targetPath = join(
+          fixtureRoot,
+          `relative-signed-${selectorBias}-${format}.o`,
+        );
+        await exec(clang, [
+          ...(format === "elf" ? ["--target=aarch64-linux-gnu"] : []),
+          `-DREA_SELECTOR_BIAS=${selectorBias}`,
+          "-c",
+          signedRelativeSource,
+          "-o",
+          targetPath,
+        ]);
+        crossTargets.push([
+          targetPath,
+          `relative-signed-${selectorBias}`,
+          { format, architecture: "arm64" },
+        ]);
+      }
+    }
 
     await exec(clang, [
       "--target=aarch64-linux-gnu",
@@ -250,6 +284,14 @@ try {
   }
   await writeFile(malformedPath, Buffer.from("not-a-binary\n", "utf8"));
 
+  const relocationSymbols = crossFormat
+    ? await verifyGhidraRelocationSymbols({
+        clang,
+        lld,
+        env: process.env,
+      })
+    : null;
+
   const debug = await verifyTarget(debugPath, "debug", expectedNativeTarget);
   assertDebugFixture(debug);
   const layout = await verifyTarget(
@@ -280,6 +322,10 @@ try {
   const customPath = process.env.GHIDRA_TARGET_PATH;
   const custom =
     customPath === undefined ? null : await verifyTarget(customPath, "custom");
+  const projectCoverage =
+    !crossFormat && !aarch64JumpTableOnly && process.platform !== "win32"
+      ? await verifyProjectCoverage(verifierRun)
+      : null;
   report = {
     ok: true,
     provider: { id: "ghidra", version: SUPPORTED_GHIDRA_VERSION },
@@ -300,6 +346,8 @@ try {
       ? (crossResults[0]?.native_api_cli ?? null)
       : jumpTable.native_api_cli,
     native_value_e2e: debug.native_values,
+    selected_project_coverage: projectCoverage,
+    relocation_symbols: relocationSymbols,
     custom_target: custom === null ? null : summary(custom),
     cleanup: "complete",
   };
@@ -458,11 +506,10 @@ async function verifyTarget(targetPath, variant, expectedTarget = null) {
 
   const client = new GhidraClient({
     launcher: new GhidraHeadlessLauncher({
+      configurationDirectoryName: installation.configurationDirectoryName,
       environment: process.env,
       analyzeHeadlessPath: installation.analyzeHeadlessPath,
-      ...(process.env.JAVA_HOME === undefined
-        ? {}
-        : { javaHome: process.env.JAVA_HOME }),
+      javaHome: installation.javaHome,
       bridgeScriptPath: fileURLToPath(
         new URL("../bridge/ghidra/ReaGhidraBridge.java", import.meta.url),
       ),
@@ -522,25 +569,30 @@ async function verifyTarget(targetPath, variant, expectedTarget = null) {
             client,
           })
         : null;
-    const probes = variant.startsWith("relative-")
-      ? await verifyRelativeSwitch(
+    const probes = variant.startsWith("relative-signed-")
+      ? await verifyRelativeSignedSwitch(
           client,
-          procedures,
-          Number(variant.slice(-1)),
+          Number(variant.split("-").at(-1)),
         )
-      : variant === "type-layout"
-        ? await verifyNativeTypeLayout(client, names)
-        : variant === "jump-table"
-          ? await verifyJumpTableDenseSwitch(client, procedures)
-          : variant === "custom" || variant === "aarch64-jump-table"
-            ? null
-            : await verifyInventoryOperations({
-                client,
-                variant,
-                procedures,
-                names,
-                strings,
-              });
+      : variant.startsWith("relative-")
+        ? await verifyRelativeSwitch(
+            client,
+            procedures,
+            Number(variant.slice(-1)),
+          )
+        : variant === "type-layout"
+          ? await verifyNativeTypeLayout(client, names)
+          : variant === "jump-table"
+            ? await verifyJumpTableDenseSwitch(client, procedures)
+            : variant === "custom" || variant === "aarch64-jump-table"
+              ? null
+              : await verifyInventoryOperations({
+                  client,
+                  variant,
+                  procedures,
+                  names,
+                  strings,
+                });
     const nativeValues =
       variant === "debug"
         ? await verifyNativeValueTrace(client, procedures, parsedTarget.value)

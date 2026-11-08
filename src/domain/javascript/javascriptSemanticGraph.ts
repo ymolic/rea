@@ -265,6 +265,22 @@ function* checkCoverageSteps(
   graph: GraphRecord,
   context: GraphIssueReporter,
 ): Generator<void> {
+  const omittedUnknowns = graph.coverage.omitted_unknown_occurrences ?? [];
+  sortedUniqueIssue(
+    omittedUnknowns.map(({ family, reason }) => `${family}:${reason}`),
+    ["coverage", "omitted_unknown_occurrences"],
+    "Unknown omission coverage",
+    context,
+  );
+  if (
+    omittedUnknowns.length > 0 &&
+    (!graph.coverage.truncated || graph.coverage.status !== "partial")
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["coverage"],
+      message: "Omitted unknown occurrences require truncated partial coverage",
+    });
   const families = graph.coverage.families.map(({ family }) => family);
   if (
     canonicalJson(families, "JavaScript semantic graph") !==
@@ -297,6 +313,24 @@ function* checkCoverageSteps(
       path: ["coverage", "limits"],
       message: "Truncated graph coverage must identify an effective limit",
     });
+  if (graph.coverage.truncated && graph.coverage.status !== "partial")
+    context.addIssue({
+      code: "custom",
+      path: ["coverage", "status"],
+      message: "Truncated semantic graph coverage must be partial",
+    });
+  if (
+    graph.coverage.truncated &&
+    graph.coverage.omitted_nodes === 0 &&
+    graph.coverage.omitted_relations === 0 &&
+    omittedUnknowns.length === 0
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["coverage"],
+      message:
+        "Truncated semantic graph coverage must acknowledge omitted facts",
+    });
   const relationsByFamily = new Map(
     JAVASCRIPT_SEMANTIC_RELATION_FAMILIES.map((family) => [family, 0]),
   );
@@ -306,9 +340,11 @@ function* checkCoverageSteps(
     relationsByFamily.set(family, (relationsByFamily.get(family) ?? 0) + 1);
   }
   const unknownsById = new Map<string, GraphRecord["unknowns"][number]>();
+  const unknownFamilies = new Set<string>();
   for (const [index, unknown] of graph.unknowns.entries()) {
     if (index % 256 === 0) yield;
     unknownsById.set(unknown.unknown_id, unknown);
+    unknownFamilies.add(unknown.family);
   }
   for (const [index, family] of graph.coverage.families.entries()) {
     if (family.retained_relations !== relationsByFamily.get(family.family))
@@ -329,7 +365,10 @@ function* checkCoverageSteps(
       });
     if (
       family.status === "complete" &&
-      (family.omitted_relations !== 0 || family.unknown_ids.length > 0)
+      (family.omitted_relations !== 0 ||
+        family.unknown_ids.length > 0 ||
+        unknownFamilies.has(family.family) ||
+        omittedUnknowns.some((omitted) => omitted.family === family.family))
     )
       context.addIssue({
         code: "custom",
@@ -713,20 +752,6 @@ export type JavaScriptSemanticGraph = z.infer<
   typeof javaScriptSemanticGraphSchema
 >;
 
-/** Resolve one fact's compact provenance without changing its stored shape. */
-export const resolveJavaScriptSemanticEvidence = (
-  graph: Pick<JavaScriptSemanticGraph, "evidence_contexts">,
-  reference: JavaScriptSemanticEvidenceReference,
-): ApplicationGraphEvidence => {
-  const context = graph.evidence_contexts.find(
-    ({ context_id }) => context_id === reference.context_id,
-  );
-  if (context === undefined)
-    throw new TypeError("Semantic evidence reference names an absent context");
-  const { context_id: _contextId, ...evidenceContext } = context;
-  return { ...evidenceContext, location: reference.location };
-};
-
 const normalizeGraphInput = (
   parsed: JavaScriptSemanticGraphInput,
 ): JavaScriptSemanticGraphInput => ({
@@ -755,6 +780,18 @@ const normalizeGraphInput = (
         canonicalJson(right, "JavaScript semantic graph"),
       ),
     ),
+    ...(parsed.coverage.omitted_unknown_occurrences === undefined
+      ? {}
+      : {
+          omitted_unknown_occurrences: [
+            ...parsed.coverage.omitted_unknown_occurrences,
+          ].sort((left, right) =>
+            compareUnicodeCodePoints(
+              `${left.family}:${left.reason}`,
+              `${right.family}:${right.reason}`,
+            ),
+          ),
+        }),
     families: [...parsed.coverage.families]
       .map((family) => ({
         ...family,
@@ -801,14 +838,6 @@ const semanticGraphContainerSchema = javaScriptSemanticGraphInputSchema.extend({
   fingerprints: arrayContainerSchema(semanticGraphShape.fingerprints),
   unknowns: arrayContainerSchema(semanticGraphShape.unknowns),
 });
-
-/** Clone input synchronously; commit, check and seal the owned graph in steps. */
-export const createImmutableJavaScriptSemanticGraphSteps = (
-  input: unknown,
-): Generator<void, JavaScriptSemanticGraph> =>
-  validateAndSealSemanticGraphSteps(
-    normalizeGraphInput(javaScriptSemanticGraphInputSchema.parse(input)),
-  );
 
 /**
  * Seal a graph whose input the caller transfers: the caller neither retains nor

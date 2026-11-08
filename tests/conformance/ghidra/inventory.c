@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 volatile int rea_ghidra_inventory_global = 7;
 
@@ -38,9 +39,24 @@ struct ReaFixtureLayout {
 volatile struct ReaFixtureLayout rea_ghidra_inventory_layout = {
     REA_FIXTURE_READY, {.word = 5}, 0};
 
+struct ReaFixtureBits {
+  unsigned int low : 3;
+  unsigned int high : 5;
+};
+volatile struct ReaFixtureBits rea_ghidra_inventory_bits = {1, 2};
+
 __attribute__((noinline, used)) int rea_ghidra_inventory_leaf(int value) {
   puts("REA_GHIDRA_LEAF_VALUE");
   return value + rea_ghidra_inventory_global;
+}
+
+// Ghidra's no-return analysis recognizes abort; this function provides a real
+// terminal-call boundary while retaining a returning path.
+__attribute__((noinline, used)) int rea_ghidra_inventory_terminal_call(
+    int should_abort) {
+  if (should_abort) abort();
+  puts("REA_GHIDRA_TERMINAL_CALL_RETURNED");
+  return should_abort;
 }
 
 // A reference into the function body can land inside an instruction.
