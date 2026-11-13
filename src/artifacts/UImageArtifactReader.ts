@@ -1,3 +1,4 @@
+import { ArtifactPreparation } from "./ArtifactPreparation.js";
 import { Readable, Transform, pipeline } from "node:stream";
 import { crc32 } from "node:zlib";
 import { readArtifactFileBytes } from "./ArtifactFileRange.js";
@@ -47,7 +48,7 @@ export class UImageArtifactReader implements ArtifactReader {
   readonly #entries = new Map<string, UImageEntry>();
   readonly #streams = new Set<Readable>();
   readonly #source: ArtifactFileSource;
-  #prepared: Promise<void> | undefined;
+  readonly #preparation = new ArtifactPreparation();
   #header: UImageMetadata | undefined;
   #closing = false;
 
@@ -75,8 +76,11 @@ export class UImageArtifactReader implements ArtifactReader {
   ): AsyncIterable<ArtifactEntry> {
     await this.#scope.run(async () => {
       this.#assertOpen(signal);
-      this.#prepared ??= this.#prepare(signal);
-      await this.#prepared;
+      await this.#preparation.run(
+        signal,
+        () => this.#prepare(signal),
+        () => this.#assertOpen(signal),
+      );
       await this.#source.read(signal);
     });
     this.#assertOpen(signal);
