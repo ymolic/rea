@@ -17,9 +17,14 @@ import {
 } from "../domain/analysisResourceLimits.js";
 import { DEFAULT_BRIDGE_MAX_REQUEST } from "./bridgeMaxRequestBytes.js";
 import { DEFAULT_BRIDGE_MAX_REPLY } from "./bridgeMaxReplyBytes.js";
+import {
+  inspectGhidraCancelGrace,
+  parseGhidraCancelGrace,
+} from "./ghidraCancelGrace.js";
 import { hopperCallerScanBudgetFromEnvironment } from "./hopperCallerScanBudget.js";
 import { DEFAULT_REGEX_MATCHING_DEADLINE } from "./regexMatchingDeadline.js";
 import { DEFAULT_REGEX_WORKER_HEAP_REQUEST } from "./regexWorkerHeapRequest.js";
+import { DEFAULT_MCP_TOOLS_LIST_PAGE_BUDGET } from "./mcpToolsListPageBudget.js";
 import type { AppConfig } from "./types.js";
 /**
  * Environment native analysis admits. JEB validates its own settings during
@@ -51,6 +56,7 @@ export const inspectNativeAnalysisConfiguration = (
   const issues = [
     ...(parsed.ok ? [] : parsed.error.settings),
     ...inspectAnalysisSettingSeeds(nativeAnalysisEnvironment(environment)),
+    ...inspectGhidraCancelGrace(environment),
   ];
   const configuredTimeout = environment.REA_HOPPER_STARTUP_TIMEOUT_MS;
   if (configuredTimeout === undefined) return { issues };
@@ -122,6 +128,15 @@ export const parseConfig = (
     ...(env.REA_MCP_MAX_INPUT_ELEMENTS === undefined
       ? {}
       : { mcpMaxInputElements: env.REA_MCP_MAX_INPUT_ELEMENTS }),
+    ...(env.REA_MCP_TOOLS_LIST_PAGE_BYTES === undefined
+      ? {}
+      : {
+          mcpToolsListPageBudget: {
+            ...DEFAULT_MCP_TOOLS_LIST_PAGE_BUDGET,
+            bytes: env.REA_MCP_TOOLS_LIST_PAGE_BYTES,
+            source: "setting",
+          },
+        }),
     ...(env.REA_MCP_OUTPUT_SCHEMA_PROFILE === undefined
       ? {}
       : { mcpOutputSchemaProfile: env.REA_MCP_OUTPUT_SCHEMA_PROFILE }),
@@ -148,6 +163,9 @@ export const parseConfig = (
       : { ghidraCheckpointDirectory: env.REA_GHIDRA_CHECKPOINT_DIR }),
     ghidraJavaHome: env.JAVA_HOME,
     ghidraStartupTimeoutMs: ghidraStartup ?? DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS,
+    ghidraCancelGrace: parseGhidraCancelGrace(
+      environment.REA_GHIDRA_CANCEL_GRACE_MS,
+    ),
     ...(decompilePayload === undefined || decompilePayload === null
       ? {}
       : { ghidraDecompileMaxPayloadMiB: decompilePayload }),

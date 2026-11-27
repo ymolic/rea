@@ -1,16 +1,7 @@
 import { appendCallerPath } from "../filesystem/callerPath.js";
 import { classifyProviderFailure } from "../providers/classifyProviderFailure.js";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import {
-  copyFile,
-  lstat,
-  mkdir,
-  open,
-  realpath,
-  rename,
-  rm,
-} from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { AnalysisProfileCommitment } from "../domain/analysisProfile.js";
@@ -32,6 +23,7 @@ import {
 } from "../filesystem/RegularFile.js";
 import { acquireOwnedLease, type OwnedLease } from "../process/OwnedLease.js";
 import {
+  copyGhidraRegularFile,
   ghidraFileDialect,
   readGhidraProfileArtifact,
 } from "./GhidraFileArtifacts.js";
@@ -98,6 +90,37 @@ const failure = (directory: string, reason: string, cause?: unknown) =>
       settings: [{ setting: "REA_GHIDRA_CHECKPOINT_DIR", constraint: reason }],
     },
   );
+
+/**
+ * Another live REA session holds this checkpoint's lease. The directory and
+ * its setting are valid, so this is contention that ends when that session
+ * closes the target, not a configuration fault.
+ */
+export class GhidraCheckpointBusyError extends Error {
+  constructor(
+    readonly directory: string,
+    readonly owner: { readonly runId: string; readonly processId: number },
+  ) {
+    super(
+      `Ghidra checkpoint at ${JSON.stringify(directory)} is in use by another REA session (run ${owner.runId}, process ${String(owner.processId)})`,
+    );
+    this.name = "GhidraCheckpointBusyError";
+  }
+}
+
+/**
+ * The checkpoint no longer holds the generation this session selected,
+ * normally because another session saved Program edits while this one
+ * waited. The current checkpoint is intact; reopening selects it.
+ */
+export class GhidraCheckpointSupersededError extends Error {
+  constructor(readonly directory: string) {
+    super(
+      `Ghidra checkpoint at ${JSON.stringify(directory)} changed after this session selected it, normally because another REA session saved Program edits; reopen the target to restore the current checkpoint`,
+    );
+    this.name = "GhidraCheckpointSupersededError";
+  }
+}
 
 /** Hash large packed Programs with one 64 KiB buffer and stable descriptor identity. */
 export const hashGhidraPackedProgram = (
@@ -273,10 +296,7 @@ export class GhidraCheckpoint {
         ),
     });
     if (!acquired.acquired)
-      throw failure(
-        directory,
-        `another REA session owns this checkpoint (run ${acquired.owner.runId}, process ${acquired.owner.processId}); close that session before retrying`,
-      );
+      throw new GhidraCheckpointBusyError(directory, acquired.owner);
     this.#lease = acquired.lease;
     this.#source = undefined;
     const current = await readSource(this.selection, this.resources, signal);
@@ -286,11 +306,7 @@ export class GhidraCheckpoint {
         ? this.#state.kind === "initial-analysis"
         : this.#state.kind === "retained" &&
           this.#state.sha256 === generation.sha256;
-    if (!aligned)
-      throw failure(
-        directory,
-        "the checkpoint changed after profile selection; reopen the target",
-      );
+    if (!aligned) throw new GhidraCheckpointSupersededError(directory);
     assertArtifactReadActive(signal);
     this.#source = current;
     return current === null
@@ -320,45 +336,35 @@ export class GhidraCheckpoint {
     let failed = false;
     try {
       assertArtifactReadActive(signal);
-      await copyFile(path, destination, constants.COPYFILE_EXCL);
-      const sha256 = await hashGhidraPackedProgram(
-        destination,
-        this.resources,
+      const hash = createHash("sha256");
+      await copyGhidraRegularFile(path, destination, this.resources, {
         signal,
-      );
+        hash,
+        sync: true,
+      });
+      const sha256 = hash.digest("hex");
       const source: CheckpointSource = {
         file,
         sha256,
         kind: previous === null ? "initial-analysis" : "retained",
       };
-      for (const [output, bytes] of [
-        [destination, undefined],
-        [
-          temporary,
-          JSON.stringify({
-            version: 2,
-            target_sha256: this.selection.target_sha256,
-            base_profile_digest: this.selection.base_profile_digest,
-            source,
-          }),
-        ],
-      ] as const) {
-        const handle = await open(
-          output,
-          bytes === undefined ? "r+" : "wx",
-          0o600,
-        );
-        await withArtifactFileHandle(
-          output,
-          handle,
-          this.resources,
-          signal,
-          async (handle) => {
-            if (bytes !== undefined) await handle.writeFile(bytes);
-            await handle.sync();
-          },
-        );
-      }
+      const metadata = JSON.stringify({
+        version: 2,
+        target_sha256: this.selection.target_sha256,
+        base_profile_digest: this.selection.base_profile_digest,
+        source,
+      });
+      const handle = await open(temporary, "wx", 0o600);
+      await withArtifactFileHandle(
+        temporary,
+        handle,
+        this.resources,
+        signal,
+        async (handle) => {
+          await handle.writeFile(metadata);
+          await handle.sync();
+        },
+      );
       assertArtifactReadActive(signal);
       await rename(
         temporary,

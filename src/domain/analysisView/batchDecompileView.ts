@@ -20,7 +20,10 @@ import {
   completeWithinViewCoverage,
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
-import { analysisViewInputError } from "./analysisViewErrors.js";
+import {
+  analysisViewInputError,
+  invalidAnalysisView,
+} from "./analysisViewErrors.js";
 import {
   createAnalysisViewResultReader,
   type AnalysisViewParent,
@@ -34,7 +37,11 @@ import {
   analysisTextPage,
   analysisTextPageItemSchema,
 } from "./analysisViewText.js";
-import { selectViewRows } from "./selectViewRows.js";
+import {
+  selectIndexedViewRows,
+  selectViewRows,
+  filterSet,
+} from "./selectViewRows.js";
 
 const OPERATION = "batch_decompile" as const;
 
@@ -260,9 +267,6 @@ const batchUnknowns = (items: readonly BatchDecompileItem[]): string[] => {
   ];
 };
 
-const selected = <Value>(values: readonly Value[] | undefined) =>
-  values === undefined ? undefined : new Set(values);
-
 const itemRow = (
   item: BatchDecompileItem,
   index: number,
@@ -323,15 +327,8 @@ export const projectBatchDecompileView = (
     "batch-decompile",
   );
   if (view === undefined)
-    return err(
-      analysisViewInputError([
-        {
-          path: ["view"],
-          reason: "invalid_value",
-          message:
-            "batch_decompile Evidence supports summary and batch-decompile views of items or pseudocode.",
-        },
-      ]),
+    return invalidAnalysisView(
+      "batch_decompile Evidence supports summary and batch-decompile views of items or pseudocode.",
     );
   const parsed = checkedBatch(parent);
   if (!parsed.ok) return parsed;
@@ -367,22 +364,28 @@ export const projectBatchDecompileView = (
       coverage: completeWithinViewCoverage(1),
     });
   if (view.collection === "items") {
-    const indices = selected(view.where.indices);
-    const addresses = selected(view.where.addresses);
-    const entries = selected(view.where.procedure_addresses);
-    const statuses = selected<string>(view.where.statuses);
-    const { rows, total } = selectViewRows(
-      batch.items,
-      view,
-      (item, index) =>
-        (indices === undefined || indices.has(index)) &&
-        (addresses === undefined || addresses.has(item.address)) &&
-        (statuses === undefined || statuses.has(item.status)) &&
-        (entries === undefined ||
-          (item.procedure.status === "resolved" &&
-            entries.has(item.procedure.address))),
-      (item, index) => itemRow(item, index, view.include_pseudocode),
-    );
+    const indices = filterSet(view.where.indices);
+    const addresses = filterSet(view.where.addresses);
+    const entries = filterSet(view.where.procedure_addresses);
+    const statuses = filterSet<string>(view.where.statuses);
+    const matches = (item: (typeof batch.items)[number]) =>
+      (addresses === undefined || addresses.has(item.address)) &&
+      (statuses === undefined || statuses.has(item.status)) &&
+      (entries === undefined ||
+        (item.procedure.status === "resolved" &&
+          entries.has(item.procedure.address)));
+    const projectItem = (item: (typeof batch.items)[number], index: number) =>
+      itemRow(item, index, view.include_pseudocode);
+    const { rows, total } =
+      indices !== undefined
+        ? selectIndexedViewRows(
+            batch.items,
+            indices,
+            view,
+            matches,
+            projectItem,
+          )
+        : selectViewRows(batch.items, view, matches, projectItem);
     return ok({
       kind: "batch-decompile" as const,
       view,

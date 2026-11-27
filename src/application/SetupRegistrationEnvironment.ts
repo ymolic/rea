@@ -32,6 +32,7 @@ const SELECTED_REGISTRATION_SETTINGS = [
   "REA_BROWSER_NO_SANDBOX",
   "REA_PWNTOOLS_PYTHON",
   "REA_PWNTOOLS_MAX_INPUT_BYTES",
+  "REA_PRODUCER_OUTPUT_BYTES",
   "REA_PWNDBG_GDB",
   "REA_PWNDBG_GDBINIT",
   "REA_PWNDBG_VENV_PATH",
@@ -65,6 +66,7 @@ const SELECTED_REGISTRATION_SETTINGS = [
   "REA_CAPTURE_PACKET_JSON_EXPANSION_BYTES",
   "REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS",
   "REA_GHIDRA_STARTUP_TIMEOUT_MS",
+  "REA_GHIDRA_CANCEL_GRACE_MS",
   "REA_GHIDRA_LANGUAGE_ID",
   "REA_GHIDRA_COMPILER_SPEC_ID",
   "REA_GHIDRA_DISABLED_ANALYZERS",
@@ -92,6 +94,7 @@ const SELECTED_REGISTRATION_SETTINGS = [
   "REA_WINDOWS_CHANGE_TIME_SETTLE_POLL_MS",
   "REA_MCP_INITIALIZE_BUDGET_MS",
   "REA_MCP_TOOLS_LIST_BUDGET_MS",
+  "REA_MCP_TOOLS_LIST_PAGE_BYTES",
   "REA_MCP_FIRST_CATALOG_BUDGET_MS",
   "REA_MCP_DOCTOR_DEADLINE_MS",
 ] as const;
@@ -122,15 +125,22 @@ export const explicitSetupRegistrationEnvironment = (
     }),
   );
 
+/** Saved values stay in the settings file and must never be copied to a client. */
+export const copyableProviderRegistrationSettings = ({
+  registrationEnvironment,
+  providerSettings,
+}: DoctorProviderInspection): readonly [string, string][] =>
+  Object.entries(registrationEnvironment).filter(
+    ([key]) => providerSettings?.[key]?.source !== "config",
+  );
+
 /** Discovered provider defaults; explicit selections are applied separately. */
 export const providerRegistrationEnvironment = (
   inspections: readonly DoctorProviderInspection[],
 ): Readonly<Record<string, string>> =>
   Object.fromEntries(
     inspections
-      .flatMap(({ registrationEnvironment }) =>
-        Object.entries(registrationEnvironment),
-      )
+      .flatMap(copyableProviderRegistrationSettings)
       .sort(([left], [right]) => compareUnicodeCodePoints(left, right)),
   );
 
